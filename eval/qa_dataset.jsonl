@@ -1,0 +1,5 @@
+{"question": "What deep-learning architectures are commonly used for pneumonia detection from chest X-rays?"}
+{"question": "How is model interpretability addressed in chest X-ray pneumonia classification?"}
+{"question": "How does Grad-CAM support weakly-supervised localization of pneumonia in chest X-rays?"}
+{"question": "What are the benefits of ensembling multiple CNNs for chest X-ray classification?"}
+{"question": "How can pneumonia triage models be deployed on resource-constrained or mobile devices?"}

@@ -1,0 +1,26 @@
+# ---- Core ----
+python-dotenv>=1.0
+pydantic>=2.6
+numpy>=1.26
+
+# ---- Embeddings & ML (CPU-friendly) ----
+sentence-transformers>=3.0
+
+# ---- Vector store (NumPy fallback is built in if this is absent) ----
+chromadb>=0.5
+
+# ---- PDF ingestion ----
+pypdf>=4.2
+
+# ---- LLM providers (OpenAI-compatible; Groq free tier by default) ----
+openai>=1.30
+
+# ---- Serving ----
+fastapi>=0.111
+uvicorn[standard]>=0.29
+
+# ---- UI ----
+streamlit>=1.36
+
+# ---- Tests ----
+pytest>=8.0
