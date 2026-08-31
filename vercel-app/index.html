@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ScholarRAG</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --ease-out:cubic-bezier(0.23,1,0.32,1);
+    --bg:#08090c; --panel:rgba(255,255,255,.04); --panel-2:rgba(255,255,255,.06);
+    --border:rgba(255,255,255,.09); --border-strong:rgba(255,255,255,.17);
+    --text:#eef0f3; --muted:#98a2b3; --accent:#7c82ff; --accent-2:#b06bff; --accent-3:#4dd9ff;
+    --grad:linear-gradient(120deg,#7c82ff,#b06bff 55%,#4dd9ff);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    background:
+      radial-gradient(55% 45% at 12% -8%,rgba(124,130,255,.20),transparent 60%),
+      radial-gradient(50% 42% at 100% -5%,rgba(176,107,255,.16),transparent 55%),
+      radial-gradient(45% 40% at 88% 10%,rgba(77,217,255,.09),transparent 55%),
+      var(--bg);
+    background-attachment:fixed; color:var(--text);
+    font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    -webkit-font-smoothing:antialiased; min-height:100vh;
+  }
+  body::before{content:"";position:fixed;inset:0 0 auto 0;height:3px;background:var(--grad);z-index:99}
+  .wrap{max-width:820px;margin:0 auto;padding:64px 22px 80px}
+  .title{font-size:clamp(2.6rem,6vw,3.3rem);font-weight:800;letter-spacing:-.035em;line-height:1.02;margin:0;
+    background:var(--grad);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+  .sub{color:var(--muted);font-size:1.06rem;margin:.6rem 0 0;max-width:40rem}
+  .pills{display:flex;gap:.5rem;flex-wrap:wrap;margin:1.1rem 0 0}
+  .pill{font-size:.78rem;color:#d7daff;border:1px solid var(--border);background:var(--panel-2);
+    padding:.3rem .75rem;border-radius:999px;backdrop-filter:blur(6px)}
+  .card{background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,.015));
+    border:1px solid var(--border);border-radius:16px;box-shadow:0 14px 40px -18px rgba(0,0,0,.75);
+    backdrop-filter:blur(8px);padding:18px}
+  .ask-card{margin-top:28px}
+  textarea{width:100%;background:var(--panel-2);border:1px solid var(--border);border-radius:12px;color:var(--text);
+    font:inherit;font-size:1rem;padding:14px;resize:vertical;min-height:96px;transition:border-color .16s var(--ease-out),box-shadow .16s var(--ease-out)}
+  textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(124,130,255,.2)}
+  .chips{display:flex;gap:.5rem;flex-wrap:wrap;margin:12px 0 4px}
+  .chip{font-size:.85rem;color:var(--text);background:var(--panel-2);border:1px solid var(--border-strong);
+    border-radius:10px;padding:.5rem .8rem;cursor:pointer;transition:transform .16s var(--ease-out),border-color .16s var(--ease-out),background .16s var(--ease-out)}
+  .chip:hover{border-color:var(--accent);background:rgba(124,130,255,.12)}
+  .chip:active{transform:scale(.98)}
+  .ask-btn{width:100%;margin-top:14px;border:none;border-radius:12px;color:#0a0b0f;font-weight:700;font-size:1rem;
+    padding:14px;cursor:pointer;background:var(--grad);box-shadow:0 10px 26px -8px rgba(124,130,255,.55);
+    transition:transform .16s var(--ease-out),filter .16s var(--ease-out)}
+  .ask-btn:hover{filter:brightness(1.07)} .ask-btn:active{transform:scale(.99)}
+  .ask-btn:disabled{filter:grayscale(.4) brightness(.8);cursor:default}
+  #out{margin-top:22px;display:none}
+  .answer{white-space:pre-wrap;line-height:1.6;font-size:1.03rem}
+  .answer sup{color:var(--accent-3);font-weight:600;font-size:.72em}
+  .meta{color:var(--muted);font-size:.82rem;margin-top:12px;font-family:'JetBrains Mono',monospace}
+  h3.sec{font-size:.95rem;margin:22px 0 8px;color:var(--text)}
+  .cite{display:flex;gap:.5rem;align-items:center;font-size:.9rem;color:#cdd2ff;background:var(--panel);
+    border:1px solid var(--border);border-radius:10px;padding:.5rem .7rem;margin-bottom:6px}
+  .cite b{color:var(--accent)}
+  .err{color:#f6b0b0;background:rgba(230,90,90,.1);border:1px solid rgba(230,90,90,.28);border-radius:12px;padding:14px}
+  .spinner{display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,.25);border-top-color:#0a0b0f;
+    border-radius:50%;animation:spin .7s linear infinite;vertical-align:-3px;margin-right:8px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .foot{margin-top:40px;color:var(--muted);font-size:.85rem;text-align:center}
+  .foot a{color:var(--accent-3);text-decoration:none} .foot a:hover{text-decoration:underline}
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+  <main class="wrap">
+    <h1 class="title">ScholarRAG</h1>
+    <p class="sub">Ask a research question and get a <strong>grounded, cited answer</strong> from a curated corpus — retrieval + an LLM, running on Vercel.</p>
+    <div class="pills">
+      <span class="pill">📎 Inline citations</span>
+      <span class="pill">⚡ Serverless</span>
+      <span class="pill">🧠 Groq LLM</span>
+    </div>
+
+    <section class="card ask-card">
+      <textarea id="q" placeholder="e.g. How do capsule networks and dynamic routing differ from CNNs?"></textarea>
+      <div class="chips" id="chips">
+        <button class="chip" data-q="What deep-learning methods are used for pneumonia detection from chest X-rays?">🫁 Pneumonia detection</button>
+        <button class="chip" data-q="How do capsule networks and dynamic routing differ from CNNs?">🧬 Capsule networks</button>
+        <button class="chip" data-q="How does Grad-CAM make model predictions interpretable?">🔬 Grad-CAM</button>
+      </div>
+      <button class="ask-btn" id="ask">Ask</button>
+    </section>
+
+    <section id="out"></section>
+
+    <p class="foot">Torch-free Vercel edition · the full app (semantic embeddings, agent, evaluation) is on
+      <a href="https://github.com/Siddharth-Golla6/scholar-rag" target="_blank" rel="noopener">GitHub</a>.</p>
+  </main>
+
+<script>
+  const $ = (s) => document.querySelector(s);
+  const q = $("#q"), out = $("#out"), askBtn = $("#ask");
+
+  document.querySelectorAll(".chip").forEach((c) =>
+    c.addEventListener("click", () => { q.value = c.dataset.q; q.focus(); })
+  );
+
+  const escapeHtml = (s) => s.replace(/[&<>]/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[m]));
+  const renderAnswer = (t) =>
+    escapeHtml(t).replace(/[\[【](\d+)[\]】]/g, '<sup>[$1]</sup>').replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+
+  async function ask() {
+    const question = q.value.trim();
+    if (!question) { q.focus(); return; }
+    askBtn.disabled = true;
+    out.style.display = "block";
+    out.innerHTML = '<div class="card"><span class="spinner"></span>Thinking…</div>';
+    try {
+      const res = await fetch("/api/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question }),
+      });
+      const data = await res.json();
+      if (data.error) {
+        out.innerHTML = '<div class="err">' + escapeHtml(data.error) + "</div>";
+        return;
+      }
+      let html = '<div class="card"><div class="answer">' + renderAnswer(data.answer) + "</div>";
+      html += '<div class="meta">retrieval + Groq · ' + (data.contexts ? data.contexts.length : 0) + " sources</div></div>";
+      if (data.citations && data.citations.length) {
+        html += '<h3 class="sec">Citations</h3>';
+        data.citations.forEach((c) => {
+          html += '<div class="cite"><b>[' + c.marker + "]</b> " + escapeHtml(c.source) + "</div>";
+        });
+      }
+      out.innerHTML = html;
+    } catch (e) {
+      out.innerHTML = '<div class="err">Request failed: ' + escapeHtml(String(e)) + "</div>";
+    } finally {
+      askBtn.disabled = false;
+    }
+  }
+  askBtn.addEventListener("click", ask);
+  q.addEventListener("keydown", (e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") ask(); });
+</script>
+</body>
+</html>
