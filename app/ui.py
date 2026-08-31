@@ -163,7 +163,11 @@ def _agent():
 
 @st.cache_resource
 def _store():
-    return get_vector_store()
+    from scholar_rag.ingestion import seed_corpus_if_empty
+
+    store = get_vector_store()
+    seed_corpus_if_empty(store=store)  # populate a fresh deploy with starter docs
+    return store
 
 
 def _set_q(q: str) -> None:
@@ -243,9 +247,9 @@ question = st.text_area(
 )
 
 EXAMPLES = [
-    ("🫁 Pneumonia methods", "What deep-learning methods are used for pneumonia detection from chest X-rays?"),
-    ("🔬 Grad-CAM", "How does Grad-CAM add interpretability to chest X-ray models?"),
-    ("🧠 ADD-Net / Alzheimer's", "What is ADD-Net and how does it detect Alzheimer's disease from MRI scans?"),
+    ("🫁 Pneumonia detection", "What deep-learning methods are used for pneumonia detection from chest X-rays?"),
+    ("🧬 Capsule networks", "How do capsule networks and dynamic routing differ from CNNs?"),
+    ("🔬 Grad-CAM", "How does Grad-CAM make model predictions interpretable?"),
 ]
 st.markdown('<div class="chips-label">Try one</div>', unsafe_allow_html=True)
 chip_cols = st.columns(len(EXAMPLES))

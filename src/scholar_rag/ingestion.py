@@ -94,3 +94,22 @@ def ingest_directory(directory=None) -> int:
     directory = Path(directory) if directory else s.papers_dir
     paths = [p for p in directory.glob("**/*") if p.suffix.lower() in (".pdf", ".txt", ".md")]
     return ingest_paths(paths)
+
+
+def seed_corpus_if_empty(store=None) -> int:
+    """Ingest the bundled starter docs (data/seed/*.md) when the store is empty,
+    so a fresh deployment doesn't open with a blank library."""
+    from .config import PROJECT_ROOT
+    from .vector_store import get_vector_store
+
+    store = store or get_vector_store()
+    if store.count() > 0:
+        return 0
+    seed_dir = PROJECT_ROOT / "data" / "seed"
+    if not seed_dir.exists():
+        return 0
+    paths = sorted(seed_dir.glob("*.md")) + sorted(seed_dir.glob("*.txt"))
+    if not paths:
+        return 0
+    log.info("Empty store: seeding from %d starter docs in %s", len(paths), seed_dir)
+    return ingest_paths(paths, store=store)

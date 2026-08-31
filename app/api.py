@@ -43,6 +43,9 @@ async def lifespan(app: FastAPI):
     _state["settings"] = get_settings()
     _state["rag"] = RAGPipeline()
     _state["agent"] = None
+    from scholar_rag.ingestion import seed_corpus_if_empty
+
+    seed_corpus_if_empty()  # populate a fresh deploy with starter docs
     log.info("ScholarRAG API ready (LLM key present: %s)", _state["settings"].has_llm_key)
     yield
 
