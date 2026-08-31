@@ -1,3 +1,15 @@
+---
+title: ScholarRAG
+emoji: 📚
+colorFrom: indigo
+colorTo: purple
+sdk: streamlit
+sdk_version: 1.47.0
+app_file: app/ui.py
+pinned: false
+license: mit
+---
+
 # 📚 ScholarRAG — Agentic RAG Research Assistant
 
 Ask questions across your own library of research papers and get **grounded,

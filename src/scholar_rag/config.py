@@ -27,6 +27,8 @@ def _resolve_data_dir(value: str) -> Path:
 
 def _get(name: str, default: str | None = None) -> str | None:
     value = os.environ.get(name)
+    if value is not None:
+        value = value.strip()  # tolerate stray whitespace / newlines in secrets
     return value if value not in (None, "") else default
 
 
