@@ -270,8 +270,21 @@ if ask and question.strip():
             with st.expander(f"[{i}] {rc.chunk.source} · score {rc.score:.2f}"):
                 st.write(rc.chunk.text)
     else:
-        with st.spinner("Thinking…"):
-            answer = _agent().run(question) if use_agent else _pipeline().answer(question, k=top_k)
+        try:
+            with st.spinner("Thinking…"):
+                answer = _agent().run(question) if use_agent else _pipeline().answer(question, k=top_k)
+        except Exception as exc:  # Streamlit redacts uncaught errors — surface the real cause
+            msg = str(exc)
+            low = msg.lower()
+            if "401" in msg or "invalid_api_key" in low or "invalid api key" in low:
+                st.error("🔑 GROQ_API_KEY is missing or invalid. Open **Manage app → Settings → Secrets** and re-check it (format: `GROQ_API_KEY = \"gsk_...\"`).")
+            elif "429" in msg or "rate_limit" in low or "rate limit" in low:
+                st.error("⏳ Groq free-tier rate limit reached (per-minute or daily quota). Wait a bit and retry, or add a fresh key.")
+            elif "404" in msg or "model_not_found" in low or "does not exist" in low:
+                st.error(f"🧩 Model `{settings.llm_model}` isn't available for this key. Set a valid `LLM_MODEL` in Secrets.")
+            else:
+                st.error(f"LLM call failed: {msg}")
+            st.stop()
 
         with st.container(border=True):
             st.markdown(answer.answer)
