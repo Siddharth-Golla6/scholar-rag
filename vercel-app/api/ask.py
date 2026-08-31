@@ -116,7 +116,7 @@ def _call_groq(system: str, user: str) -> str:
     if not key:
         raise RuntimeError("GROQ_API_KEY is not set in the Vercel project's Environment Variables.")
     payload = {
-        "model": (os.environ.get("LLM_MODEL") or "openai/gpt-oss-120b").strip(),
+        "model": "openai/gpt-oss-120b",
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
         "temperature": 0.1,
         "max_tokens": 1024,
