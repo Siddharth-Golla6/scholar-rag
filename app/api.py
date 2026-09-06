@@ -116,15 +116,9 @@ def ask_stream(req: AskRequest):
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
+from scholar_rag.websafe import is_contained as _contained  # noqa: E402
+
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MB
-
-
-def _contained(path, base) -> bool:
-    """True iff `path` resolves inside `base` (blocks path traversal / LFI)."""
-    base = pathlib.Path(base).resolve()
-    rp = pathlib.Path(path)
-    rp = (base / rp).resolve() if not rp.is_absolute() else rp.resolve()
-    return rp == base or base in rp.parents
 
 
 @app.post("/ingest")

