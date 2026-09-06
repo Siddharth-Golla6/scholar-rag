@@ -4,7 +4,7 @@ python-dotenv>=1.0
 pydantic>=2.6
 numpy>=1.26
 
-# ---- Embeddings & ML (CPU-friendly) ----
+# ---- Embeddings & ML ----
 sentence-transformers>=3.0
 
 # ---- Vector store (NumPy fallback is built in if this is absent) ----
@@ -25,4 +25,6 @@ streamlit>=1.36
 
 # ---- Tests ----
 pytest>=8.0
+
+# ---- HF Spaces ZeroGPU runtime ----
 spaces

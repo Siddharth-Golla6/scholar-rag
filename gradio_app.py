@@ -51,7 +51,17 @@ def status_md() -> str:
     return f"**Model** `{settings.llm_model}` &nbsp;·&nbsp; **{n} passages indexed** &nbsp;·&nbsp; {key}"
 
 
-@spaces.GPU(duration=120)
+# ZeroGPU (the free HF Spaces GPU tier) requires at least one @spaces.GPU function
+# to exist at startup. ScholarRAG does its real work on CPU — MiniLM embeddings plus
+# an external LLM API — so it never needs the GPU for inference. This tiny probe only
+# satisfies that startup check and absorbs ZeroGPU's periodic keep-warm ping (which
+# calls the registered GPU function with arbitrary args); the real handler, ask(),
+# runs on CPU in the main process, avoiding GPU forks, quota use and CUDA edge cases.
+@spaces.GPU(duration=1)
+def _gpu_probe(*args, **kwargs):
+    return True
+
+
 def ask(question: str, mode: str, top_k: int, do_eval: bool):
     if not question or not question.strip():
         return "Please enter a question.", "", "", ""
