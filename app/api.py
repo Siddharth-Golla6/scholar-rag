@@ -116,9 +116,28 @@ def ask_stream(req: AskRequest):
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
+MAX_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MB
+
+
+def _contained(path, base) -> bool:
+    """True iff `path` resolves inside `base` (blocks path traversal / LFI)."""
+    base = pathlib.Path(base).resolve()
+    rp = pathlib.Path(path)
+    rp = (base / rp).resolve() if not rp.is_absolute() else rp.resolve()
+    return rp == base or base in rp.parents
+
+
 @app.post("/ingest")
 def ingest(req: IngestRequest):
-    n = ingest_paths(req.paths)
+    # SECURITY: only ingest files inside the app's own data dir — never arbitrary
+    # server paths (which would be an arbitrary-file-read / LFI primitive).
+    s = _state["settings"]
+    base = s.data_dir.resolve()
+    safe = [str((base / p).resolve() if not pathlib.Path(p).is_absolute() else pathlib.Path(p).resolve())
+            for p in req.paths if _contained(p, base)]
+    if not safe:
+        raise HTTPException(status_code=400, detail="paths must be inside the app data directory")
+    n = ingest_paths(safe)
     return {"ingested_chunks": n, "documents_indexed": get_vector_store(_state["settings"]).count()}
 
 
@@ -126,8 +145,16 @@ def ingest(req: IngestRequest):
 async def ingest_upload(file: UploadFile = File(...)):
     s = _state["settings"]
     s.papers_dir.mkdir(parents=True, exist_ok=True)
-    dest = s.papers_dir / (file.filename or "upload.pdf")
-    dest.write_bytes(await file.read())
+    # SECURITY: strip any directory components from the client-supplied filename so
+    # it cannot traverse out of papers_dir (arbitrary file write / RCE via traversal).
+    safe_name = pathlib.Path(file.filename or "upload.pdf").name or "upload.pdf"
+    dest = s.papers_dir / safe_name
+    if not _contained(dest, s.papers_dir):
+        raise HTTPException(status_code=400, detail="invalid filename")
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="file too large")
+    dest.write_bytes(data)
     n = ingest_paths([dest])
     return {"filename": dest.name, "ingested_chunks": n}
 

