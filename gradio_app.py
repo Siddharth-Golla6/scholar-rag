@@ -12,6 +12,7 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "src"))
 
 import gradio as gr
+import spaces
 
 from scholar_rag.config import get_settings
 from scholar_rag.ingestion import chunks_from_text, ingest_paths, seed_corpus_if_empty
@@ -50,6 +51,7 @@ def status_md() -> str:
     return f"**Model** `{settings.llm_model}` &nbsp;·&nbsp; **{n} passages indexed** &nbsp;·&nbsp; {key}"
 
 
+@spaces.GPU(duration=120)
 def ask(question: str, mode: str, top_k: int, do_eval: bool):
     if not question or not question.strip():
         return "Please enter a question.", "", "", ""

@@ -1,6 +1,3 @@
-# ---- CPU-only PyTorch (keeps cloud installs small; avoids CUDA download) ----
---extra-index-url https://download.pytorch.org/whl/cpu
-torch>=2.2
 
 # ---- Core ----
 python-dotenv>=1.0
@@ -28,3 +25,4 @@ streamlit>=1.36
 
 # ---- Tests ----
 pytest>=8.0
+spaces
