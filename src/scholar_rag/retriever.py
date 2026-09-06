@@ -44,6 +44,7 @@ class Retriever:
     def retrieve(self, query: str, k: int | None = None, use_mmr: bool = True,
                  fetch_k: int | None = None) -> list[RetrievedContext]:
         k = k or self.settings.top_k
+        k = max(1, min(int(k), 20))  # clamp: bound prompt size / MMR cost (untrusted callers)
         fetch_k = fetch_k or max(k * 3, k)
         query_vec = self.embedder.encode(query, is_query=True)[0]
         candidates = self.store.query(query_vec, k=fetch_k)

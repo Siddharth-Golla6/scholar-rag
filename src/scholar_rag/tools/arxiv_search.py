@@ -10,7 +10,7 @@ from ..logging_utils import get_logger
 
 log = get_logger("tools.arxiv")
 
-ARXIV_API = "http://export.arxiv.org/api/query"
+ARXIV_API = "https://export.arxiv.org/api/query"
 _NS = {"a": "http://www.w3.org/2005/Atom"}
 
 
