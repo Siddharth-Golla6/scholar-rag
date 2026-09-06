@@ -125,7 +125,14 @@ def _meta_html(answer) -> str:
 
 
 def _err(msg: str):
-    return (msg, "", "", "", "")
+    return (
+        msg,
+        gr.update(value="", visible=False),
+        gr.update(value="", visible=False),
+        gr.update(visible=False),
+        gr.update(value=""),
+        gr.update(value="", visible=False),
+    )
 
 
 def ask(question: str, mode: str, top_k: int, do_eval: bool):
@@ -196,7 +203,14 @@ def ask(question: str, mode: str, top_k: int, do_eval: bool):
         except Exception as exc:
             eval_html = f'<div class="sr-judgenote">evaluation failed: {exc}</div>'
 
-    return answer_md, meta_html, cites_md, ctx_md, eval_html
+    return (
+        answer_md,
+        gr.update(value=meta_html, visible=True),
+        gr.update(value=cites_md, visible=bool(cites_md)),
+        gr.update(visible=bool(ctx_md)),
+        gr.update(value=ctx_md),
+        gr.update(value=eval_html, visible=bool(eval_html)),
+    )
 
 
 def ingest_uploaded(files):
@@ -565,24 +579,18 @@ with gr.Blocks(theme=theme, css=CSS, js=FORCE_DARK, title="ScholarRAG") as demo:
         arxiv_btn = gr.Button("Fetch & ingest")
 
     answer_out = gr.Markdown(_EMPTY_ANSWER, elem_classes="sr-answer")
-    meta_out = gr.HTML(elem_classes="sr-metawrap")
-    cites_out = gr.Markdown(elem_classes="sr-cites")
-    with gr.Accordion("Retrieved context", open=False, elem_classes="sr-ctx"):
+    meta_out = gr.HTML(elem_classes="sr-metawrap", visible=False)
+    cites_out = gr.Markdown(elem_classes="sr-cites", visible=False)
+    ctx_acc = gr.Accordion("Retrieved context", open=False, elem_classes="sr-ctx", visible=False)
+    with ctx_acc:
         ctx_out = gr.Markdown()
-    eval_out = gr.HTML(elem_classes="sr-evalwrap")
+    eval_out = gr.HTML(elem_classes="sr-evalwrap", visible=False)
 
     gr.HTML(FOOTER)
 
-    ask_btn.click(
-        ask,
-        [question, mode, top_k, do_eval],
-        [answer_out, meta_out, cites_out, ctx_out, eval_out],
-    )
-    question.submit(
-        ask,
-        [question, mode, top_k, do_eval],
-        [answer_out, meta_out, cites_out, ctx_out, eval_out],
-    )
+    _outputs = [answer_out, meta_out, cites_out, ctx_acc, ctx_out, eval_out]
+    ask_btn.click(ask, [question, mode, top_k, do_eval], _outputs)
+    question.submit(ask, [question, mode, top_k, do_eval], _outputs)
     ingest_btn.click(ingest_uploaded, [uploads], [status])
     arxiv_btn.click(fetch_arxiv, [arxiv_q], [status])
 
